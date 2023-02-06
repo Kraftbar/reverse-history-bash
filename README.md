@@ -6,4 +6,4 @@ For testing it add this to .bashrc:
 bind -x '"\C-e": "$HOME/reverse-history-bash.sh"'
 
 
-An attemt to impement [https://github.com/zdharma/history-search-multi-word](test)
+An attemt to impement [test](https://github.com/zdharma/history-search-multi-word)
