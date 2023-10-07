@@ -1,7 +1,7 @@
 # ---------- Manage Cursor ----------
 HISTORY_FILE="~/.bash_history"
 PROMPT_COLUMN=25
-OFFSET=22
+OFFSET=1
 
 extract_current_cursor_position() {
     export $1
@@ -33,21 +33,21 @@ adjust_cursor_position() {
 
 display_prompt() {
     tput cup $((${pos1[0]} - 1)) $PROMPT_COLUMN
-    echo "Enter search string: "
-    echo -e "\n\n\n "
+    echo ""
+    echo -e "\n\n\n\n "
 }
 
 capture_user_input() {
-    while read -r -n 1 char; do
+    while IFS= read -r -n 1 char; do
         if [ "$char" = $'\x7f' ]; then
             search_string="${search_string%?}"
         else
             search_string="$search_string$char"
         fi
-
+        echo "sadad"$char"sda" >> test.log
         display_search_results
         reposition_cursor
-
+        echo $search_string >> test.log
         # Move the cursor forward here, after repositioning it
         if [ "$char" != $'\x7f' ]; then
             tput cuf1
@@ -65,9 +65,11 @@ fuzzy_search() {
 }
 
 display_search_results() {
-    fuzzy_search "$search_string" ~/.bash_history
-}
 
+
+    tput cup $((${pos1[0]}-2)) $PROMPT_COLUMN
+    echo -e "\n$(fuzzy_search "$search_string" ~/.bash_history)\n"
+}
 reposition_cursor() {
     tput cup $((${pos1[0]} - 2)) $(($PROMPT_COLUMN + $OFFSET + ${#search_string} - 1))
     echo     $((${pos1[0]} - 2)) $(($PROMPT_COLUMN + $OFFSET + ${#search_string} - 1)) >> test.log
