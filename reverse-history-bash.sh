@@ -1,6 +1,6 @@
 # ---------- Manage Cursor ----------
 HISTORY_FILE="~/.bash_history"
-PROMPT_COLUMN=25
+PROMPT_COLUMN=49
 OFFSET=1
 
 extract_current_cursor_position() {
@@ -11,8 +11,8 @@ extract_current_cursor_position() {
     echo -en "\033[6n" > /dev/tty
     IFS=';' read -r -d R -a pos
     stty $oldstty
-    eval "$1[0]=$((${pos[0]:2} - 2))"
-    eval "$1[1]=$((${pos[1]} - 2))"
+    eval "$1[0]=$((${pos[0]:2} - 1))"
+    eval "$1[1]=$((${pos[1]}   - 1))"
 }
 
 adjust_cursor_position() {
@@ -31,27 +31,21 @@ adjust_cursor_position() {
 
 # ---------- User Interface Functions ----------
 
-display_prompt() {
-    tput cup $((${pos1[0]} - 1)) $PROMPT_COLUMN
-    echo ""
-    echo -e "\n\n\n\n "
-}
 
-capture_user_input() {
+capture_user_input() {    ## active 
     while IFS= read -r -n 1 char; do
         if [ "$char" = $'\x7f' ]; then
+            echo "testestetsetst1" >> test.log
             search_string="${search_string%?}"
         else
+            echo "testestetsetst2" >> test.log
             search_string="$search_string$char"
         fi
-        echo "sadad"$char"sda" >> test.log
         display_search_results
         reposition_cursor
+
+        echo "sadad"$char"sda" >> test.log
         echo $search_string >> test.log
-        # Move the cursor forward here, after repositioning it
-        if [ "$char" != $'\x7f' ]; then
-            tput cuf1
-        fi
     done
 }
 
@@ -61,18 +55,17 @@ fuzzy_search() {
     local search_string="$1"
     local history_file="$2"
     local matches=$(grep -i "$search_string" "$history_file" | awk '{print $0}')
-    echo "$matches" | tail -5
+    echo "$matches" | head -5
 }
 
-display_search_results() {
-
-
+display_search_results() {  ## active 
     tput cup $((${pos1[0]}-2)) $PROMPT_COLUMN
     echo -e "\n$(fuzzy_search "$search_string" ~/.bash_history)\n"
 }
-reposition_cursor() {
-    tput cup $((${pos1[0]} - 2)) $(($PROMPT_COLUMN + $OFFSET + ${#search_string} - 1))
-    echo     $((${pos1[0]} - 2)) $(($PROMPT_COLUMN + $OFFSET + ${#search_string} - 1)) >> test.log
+
+reposition_cursor() {   ## active 
+    tput cup $((${pos1[0]} - 2)) $(($PROMPT_COLUMN + $OFFSET + ${#search_string} ))
+    echo     $((${pos1[0]} - 2)) $(($PROMPT_COLUMN + $OFFSET + ${#search_string} )) >> test.log
 }
 
 # ---------- Main Program ----------
@@ -80,8 +73,5 @@ reposition_cursor() {
 history -a ~/.bash_history
 search_string=""
 extract_current_cursor_position pos1
-pos1[0]=$((pos1[0] + 1))
-display_prompt
 adjust_cursor_position
 capture_user_input
-
