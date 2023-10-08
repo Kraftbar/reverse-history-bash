@@ -2,6 +2,7 @@
 HISTORY_FILE="~/.bash_history"
 PROMPT_COLUMN=49
 OFFSET=1
+current_cmd_index=0
 
 extract_current_cursor_position() {
     exec < /dev/tty
@@ -33,13 +34,14 @@ adjust_cursor_position() {
 
 
 capture_user_input() {    ## active 
-    flush_screen
     while IFS= read -r -n 1 char; do
+    flush_screen
         if [ "$char" = $'\x7f' ]; then
             search_string="${search_string%?}"
         else
             search_string="$search_string$char"
         fi
+
         display_search_results
         reposition_cursor
         echo "sadad"$char"sda" >> test.log
@@ -56,12 +58,13 @@ flush_screen(){
 fuzzy_search() {   ## active
     local search_string="$1"
     local history_file="$2"
-    local matches=$(grep -i "$search_string" "$history_file" )
+    local matches=$(grep -i "$search_string" "$history_file" | tac | awk '!x[$0]++' )
     echo "$matches" | head -5
 }
 
 display_search_results() {  ## active 
     echo -e "\n$(fuzzy_search "$search_string" ~/.bash_history)\n"
+    
 }
 
 reposition_cursor() {   ## active 
