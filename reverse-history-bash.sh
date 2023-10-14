@@ -3,7 +3,7 @@ HISTORY_FILE="~/.bash_history"
 PROMPT_COLUMN=49
 OFFSET=1
 current_cmd_index=0
-
+cmd_matches=''
 extract_current_cursor_position() {
     exec < /dev/tty
     oldstty=$(stty -g)
@@ -32,8 +32,13 @@ capture_user_input() {
         flush_screen
         if [ "$char" = $'\x7f' ]; then  # Backspace
             search_string="${search_string%?}"
-        elif [ "$char" = $'\x0d' ]; then  # Enter
-            
+        # TODO: selected_line, global?
+        elif [ "$char" =  $'\0A' ]; then  # Enter
+
+            selected_line=$(echo "$cmd_matches" | awk -v idx="$current_cmd_index" 'NR==idx')
+            eval "$selected_line"
+           echo "Selected line is: $selected_line" >> test.log
+            exit 0
         elif [ "$char" = $'\x1b' ]; then  # Escape character
             # Read the next two characters to complete the ANSI escape sequence
             read -r -n 2 next_chars
@@ -82,7 +87,8 @@ fuzzy_search() {   ## active
     local search_string="$1"
     local history_file="$2"
     local matches=$(grep -i "$search_string" "$history_file" | tac | awk '!x[$0]++' )
- #   echo "$matches" | head -5
+    matches=$(echo "$matches" | head -5)
+    cmd_matches="$matches"
     print_matches "$matches"
 
 }
