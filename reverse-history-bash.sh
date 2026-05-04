@@ -1151,10 +1151,10 @@ main_loop() {
   render_ui
   while true; do
     if (( history_stream_active == 1 )); then
-      read_key 0.01
+      read_key 0.001
       read_rc=$?
       if (( read_rc == 2 )); then
-        if ! preload_history_chunk 512; then
+        if ! preload_history_chunk 64; then
           render_ui
         fi
         continue
