@@ -19,6 +19,7 @@ matches_count=0
 overlay_rows=0
 cursor_row=0
 cursor_col=0
+cursor_saved=0
 terminal_rows=24
 terminal_cols=80
 TTY="/dev/tty"
@@ -41,10 +42,21 @@ move_cursor() {
 
 save_cursor() {
   tty_printf '\0337'
+  cursor_saved=1
 }
 
 restore_cursor() {
-  tty_printf '\0338'
+  if (( cursor_saved == 1 )); then
+    tty_printf '\0338'
+  fi
+}
+
+hide_cursor() {
+  tty_printf '\033[?25l'
+}
+
+show_cursor() {
+  tty_printf '\033[?25h'
 }
 
 query_cursor_position() {
@@ -124,17 +136,30 @@ flush_overlay() {
     return
   fi
 
+  if (( cursor_saved == 1 )); then
+    restore_cursor
+    tty_printf '\r\033[2K'
+    for (( i = 1; i < clear_rows; i++ )); do
+      tty_printf '\n\033[2K'
+    done
+    restore_cursor
+    return
+  fi
+
   for (( i = 0; i < clear_rows; i++ )); do
     row=$(( cursor_row + i ))
     move_cursor "$row" 1
-    tty_printf '\r\033[K'
+    tty_printf '\r\033[2K'
   done
   move_cursor "$cursor_row" "$cursor_col"
 }
 
 cancel_picker() {
   flush_overlay
-  if (( cursor_row > 0 && cursor_col > 0 )); then
+  if (( cursor_saved == 1 )); then
+    restore_cursor
+    show_cursor
+  elif (( cursor_row > 0 && cursor_col > 0 )); then
     move_cursor "$cursor_row" "$cursor_col"
   fi
   exit 130
@@ -515,6 +540,9 @@ render_ui() {
     return
   fi
 
+  save_cursor
+  hide_cursor
+
   local cols="$terminal_cols"
   local page_size="$MAX_DISPLAY"
   if (( page_size < 1 )); then
@@ -561,6 +589,8 @@ render_ui() {
   if (( max_lines_below <= 0 )); then
     overlay_rows=0
     flush_overlay
+    show_cursor
+    restore_cursor
     return
   fi
 
@@ -584,10 +614,12 @@ render_ui() {
   overlay_rows=$new_overlay_rows
   if (( overlay_rows <= 0 )); then
     flush_overlay "$overlay_rows"
+    show_cursor
+    restore_cursor
     return
   fi
 
-  move_cursor "$cursor_row" 1
+  restore_cursor
   draw_overlay_line "$header"
 
   local idx=$display_start
@@ -596,7 +628,6 @@ render_ui() {
     if (( row_num >= overlay_rows )); then
       break
     fi
-    move_cursor "$(( cursor_row + row_num ))" 1
     local row_prefix="  "
     if (( idx == current_cmd_index )); then
       row_prefix="> "
@@ -604,15 +635,20 @@ render_ui() {
     local visible_line
     visible_line=$(truncate_line "$line" "$(( draw_cols - 2 ))")
     visible_line=$(highlight_matches "$visible_line")
+    local row_text
+    tty_printf '\n'
     if (( idx == current_cmd_index )); then
-      draw_overlay_line "${ACTIVE_ON}${row_prefix}${visible_line}${RESET}"
+      row_text="${ACTIVE_ON}${row_prefix}${visible_line}${RESET}"
     else
-      draw_overlay_line "${row_prefix}${visible_line}${RESET}"
+      row_text="${row_prefix}${visible_line}"
     fi
+    draw_overlay_line "$row_text"
     (( idx++ ))
     (( row_num++ ))
   done <<< "$visible_matches"
-  move_cursor "$cursor_row" "$cursor_col"
+
+  show_cursor
+  restore_cursor
 }
 
 read_key() {
