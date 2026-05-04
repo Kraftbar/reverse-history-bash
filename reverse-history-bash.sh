@@ -2,12 +2,12 @@
 
 # ---------- Configuration ----------
 HISTORY_FILE="$HOME/.bash_history"
-MAX_DISPLAY="${HSMW_PAGE_SIZE:-10}"
+MAX_DISPLAY=5
 HIGHLIGHT_ON=$'\033[1;33m'
 ACTIVE_ON=$'\033[7m'
 RESET=$'\033[0m'
 if ! [[ "$MAX_DISPLAY" =~ ^[0-9]+$ ]] || (( MAX_DISPLAY < 1 )); then
-  MAX_DISPLAY=10
+  MAX_DISPLAY=5
 fi
 
 # ---------- State ----------
@@ -16,6 +16,7 @@ display_start=1
 search_string="${RHB_QUERY:-}"
 cmd_matches=""
 matches_count=0
+overlay_cap_rows=0
 overlay_rows=0
 cursor_row=0
 cursor_col=0
@@ -116,7 +117,7 @@ refresh_terminal_size() {
 flush_overlay() {
   local rows="$1"
   if [[ -z "$rows" ]]; then
-    rows=$overlay_rows
+    rows=$overlay_cap_rows
   fi
 
   if (( rows <= 0 )); then
@@ -125,36 +126,22 @@ flush_overlay() {
   if (( cursor_row <= 0 || cursor_col <= 0 )); then
     return
   fi
-  local max_rows_in_view=$(( terminal_rows - cursor_row + 1 ))
-  if (( max_rows_in_view <= 0 )); then
-    return
+  local clear_rows=$(( rows > 0 ? rows : 1 ))
+  if (( rows > terminal_rows )); then
+    clear_rows=$terminal_rows
   fi
-
-  local i clear_rows row
-  clear_rows=$rows
-  if (( max_rows_in_view < clear_rows )); then
-    clear_rows=$max_rows_in_view
+  if (( clear_rows > terminal_rows - cursor_row + 1 )); then
+    clear_rows=$(( terminal_rows - cursor_row + 1 ))
   fi
   if (( clear_rows <= 0 )); then
     return
   fi
 
-  if (( cursor_saved == 1 )); then
-    restore_cursor
-    tty_printf '\r\033[2K'
-    for (( i = 1; i < clear_rows; i++ )); do
-      tty_printf '\n\033[2K'
-    done
-    restore_cursor
-    return
+  move_cursor "$cursor_row" 1
+  tty_printf '\r\033[2K'
+  if (( clear_rows > 1 )); then
+    tty_printf '\033[J'
   fi
-
-  for (( i = 0; i < clear_rows; i++ )); do
-    row=$(( cursor_row + i ))
-    move_cursor "$row" 1
-    tty_printf '\r\033[2K'
-  done
-  move_cursor "$cursor_row" "$cursor_col"
 }
 
 cancel_picker() {
@@ -336,38 +323,13 @@ build_prompt_line() {
 fuzzy_search() {
   local query="$1"
   local history_file="$2"
-
-  local input
-  input=$(tr -d '\000' < "$history_file" 2>/dev/null || true)
-
-  cmd_matches=$(awk -v query="$query" '
-    function escape_regex(value, escaped, i, ch) {
-      escaped = ""
-      for (i = 1; i <= length(value); i++) {
-        ch = substr(value, i, 1)
-        if (ch ~ /[][\\.^$*+?(){}|]/) {
-          escaped = escaped "\\" ch
-        } else {
-          escaped = escaped ch
-        }
+  cmd_matches=$(awk -v query="$query" -v merge_multiline="${RHB_MERGE_MULTILINE:-1}" '
+    function flush_pending() {
+      if (pending_set == 1) {
+        history[++history_len] = pending
+        pending_set = 0
+        pending = ""
       }
-      return escaped
-    }
-
-    function token_regex(token, starts, ends, body) {
-      starts = substr(token, 1, 1) == "^"
-      ends = substr(token, length(token), 1) == "$"
-      body = token
-      if (starts) {
-        body = substr(body, 2)
-      }
-      if (ends && length(body) > 0) {
-        body = substr(body, 1, length(body) - 1)
-      }
-      if (body !~ /\[[^]]+\]/) {
-        body = escape_regex(body)
-      }
-      return (starts ? "^" : "") body (ends ? "$" : "")
     }
 
     BEGIN {
@@ -375,28 +337,71 @@ fuzzy_search() {
       token_count = split(query, raw_tokens, /[[:space:]]+/)
       for (i = 1; i <= token_count; i++) {
         if (raw_tokens[i] != "") {
-          tokens[++tokens_len] = token_regex(raw_tokens[i])
+          tokens[++tokens_len] = tolower(raw_tokens[i])
         }
       }
+      pending = ""
+      pending_set = 0
     }
 
     {
-      if ($0 ~ /^#[0-9]+$/) {
+      line = $0
+      sub(/\r$/, "", line)
+
+      if (line ~ /^#[0-9]+$/) {
         next
       }
-      history[++history_len] = $0
+
+      if (length(line) == 0) {
+        flush_pending()
+        next
+      }
+
+      if (merge_multiline != 1) {
+        history[++history_len] = line
+        next
+      }
+
+      if (pending_set == 1 && (line ~ /^[[:space:]]/ || pending ~ /\\$/)) {
+        pending = pending " " line
+      } else {
+        flush_pending()
+        pending = line
+        pending_set = 1
+      }
     }
 
     END {
+      flush_pending()
+      if (history_len == 0) {
+        exit
+      }
+      if (token_count == 0) {
+        for (i = history_len; i >= 1; i--) {
+          line = history[i]
+          if (line == "") {
+            continue
+          }
+          if (seen[line]++) {
+            continue
+          }
+          print line
+        }
+        exit
+      }
+
       for (i = history_len; i >= 1; i--) {
         line = history[i]
-        if (seen[line]++) {
+        if (line == "") {
           continue
         }
         lower = tolower(line)
+        if (seen[line]++) {
+          continue
+        }
         matched = 1
-        for (j = 1; j <= tokens_len; j++) {
-          if (lower !~ tokens[j]) {
+        for (j = 1; j <= token_count; j++) {
+          if (index(lower, tokens[j]) == 0) {
             matched = 0
             break
           }
@@ -406,7 +411,7 @@ fuzzy_search() {
         }
       }
     }
-  ' <<< "$input")
+  ' < <(tr -d '\000' < "$history_file" 2>/dev/null || true))
 
   count_matches
 
@@ -490,7 +495,7 @@ truncate_line() {
 
 highlight_matches() {
   local line="$1"
-  local token clean_token highlighted="$line"
+  local token clean_token token_escaped highlighted="$line"
   for token in $search_string; do
     clean_token="$token"
     clean_token="${clean_token#^}"
@@ -498,18 +503,24 @@ highlight_matches() {
     if [[ "$clean_token" == *"["*"]"* || -z "$clean_token" ]]; then
       continue
     fi
-    highlighted=$(awk -v line="$highlighted" -v token="$clean_token" -v on="$HIGHLIGHT_ON" -v off="$RESET" '
+    token_escaped="${clean_token//\\/\\\\}"
+    highlighted=$(printf '%s\n' "$highlighted" | awk -v token="$token_escaped" -v on="$HIGHLIGHT_ON" -v off="$RESET" '
       BEGIN {
-        lower = tolower(line)
+        lower_line = ""
+        line = ""
         needle = tolower(token)
-        out = ""
-        pos = 1
         n = length(needle)
         if (n == 0) {
-          print line
+          print ""
           exit
         }
-        while ((idx = index(substr(lower, pos), needle)) > 0) {
+        if (getline line != 1) {
+          exit
+        }
+        lower_line = tolower(line)
+        out = ""
+        pos = 1
+        while ((idx = index(substr(lower_line, pos), needle)) > 0) {
           idx += pos - 1
           out = out substr(line, pos, idx - pos) on substr(line, idx, n) off
           pos = idx + n
@@ -618,6 +629,7 @@ render_ui() {
 
   local max_lines_below=$(( terminal_rows - cursor_row + 1 ))
   if (( max_lines_below <= 0 )); then
+    overlay_cap_rows=$overlay_rows
     overlay_rows=0
     flush_overlay
     show_cursor
@@ -641,10 +653,13 @@ render_ui() {
     new_overlay_rows=$max_overlay_rows
   fi
 
-  flush_overlay "$overlay_rows"
+  flush_overlay "$overlay_cap_rows"
   overlay_rows=$new_overlay_rows
+  if (( overlay_rows > overlay_cap_rows )); then
+    overlay_cap_rows=$overlay_rows
+  fi
   if (( overlay_rows <= 0 )); then
-    flush_overlay "$overlay_rows"
+    flush_overlay
     show_cursor
     restore_cursor
     return
@@ -692,11 +707,40 @@ read_key() {
   fi
   if [[ "$k" == $'\x1b' ]]; then
     if (( TTY_FD > 0 )); then
-      IFS= read -rsN2 -t 0.01 -u "$TTY_FD" rest || true
+      IFS= read -rsN1 -t 0.01 -u "$TTY_FD" rest || true
+      if [[ -n "$rest" ]]; then
+        k+="$rest"
+      fi
+      if [[ "$k" == $'\x1b[' ]]; then
+        IFS= read -rsN1 -t 0.01 -u "$TTY_FD" rest || true
+        if [[ -n "$rest" ]]; then
+          k+="$rest"
+          if [[ "$rest" == [0-9] ]]; then
+            IFS= read -rsN1 -t 0.01 -u "$TTY_FD" rest || true
+            if [[ -n "$rest" ]]; then
+              k+="$rest"
+            fi
+          fi
+        fi
+      fi
     else
-      IFS= read -rsN2 -t 0.01 rest || true
+      IFS= read -rsN1 -t 0.01 rest || true
+      if [[ -n "$rest" ]]; then
+        k+="$rest"
+      fi
+      if [[ "$k" == $'\x1b[' ]]; then
+        IFS= read -rsN1 -t 0.01 rest || true
+        if [[ -n "$rest" ]]; then
+          k+="$rest"
+          if [[ "$rest" == [0-9] ]]; then
+            IFS= read -rsN1 -t 0.01 rest || true
+            if [[ -n "$rest" ]]; then
+              k+="$rest"
+            fi
+          fi
+        fi
+      fi
     fi
-    k+="$rest"
   fi
   key="$k"
 }
@@ -720,77 +764,65 @@ main_loop() {
       flush_overlay
       exit 1
     fi
-    case "$key" in
-      $'\x7f') # backspace
+    if [[ "$key" == $'\x7f' ]]; then
       if [[ -n "$search_string" ]]; then
-          delete_last_query_char
-          current_cmd_index=1
-        fi
-        fuzzy_search "$search_string" "$HISTORY_FILE"
-        render_ui
-        ;;
-      $'\x01') # Ctrl-A
-        rotate_query_words
+        delete_last_query_char
         current_cmd_index=1
-        fuzzy_search "$search_string" "$HISTORY_FILE"
+      fi
+      fuzzy_search "$search_string" "$HISTORY_FILE"
+      render_ui
+    elif [[ "$key" == $'\x01' ]]; then
+      rotate_query_words
+      current_cmd_index=1
+      fuzzy_search "$search_string" "$HISTORY_FILE"
+      render_ui
+    elif [[ "$key" == $'\x15' ]]; then
+      search_string=""
+      current_cmd_index=1
+      fuzzy_search "$search_string" "$HISTORY_FILE"
+      render_ui
+    elif [[ "$key" == $'\x17' ]]; then
+      delete_query_word
+      current_cmd_index=1
+      fuzzy_search "$search_string" "$HISTORY_FILE"
+      render_ui
+    elif [[ "$key" == $'\x1b[A' ]]; then
+      if (( matches_count > 0 )); then
+        (( current_cmd_index-- ))
+        if (( current_cmd_index < 1 )); then current_cmd_index=$matches_count; fi
+        update_display_start
         render_ui
-        ;;
-      $'\x15') # Ctrl-U
-        search_string=""
-        current_cmd_index=1
-        fuzzy_search "$search_string" "$HISTORY_FILE"
+      fi
+    elif [[ "$key" == $'\x1b[B' ]]; then
+      if (( matches_count > 0 )); then
+        (( current_cmd_index++ ))
+        if (( current_cmd_index > matches_count )); then current_cmd_index=1; fi
+        update_display_start
         render_ui
-        ;;
-      $'\x17') # Ctrl-W
-        delete_query_word
-        current_cmd_index=1
-        fuzzy_search "$search_string" "$HISTORY_FILE"
-        render_ui
-        ;;
-      $'\x1b[A') # up
-        if (( matches_count > 0 )); then
-          (( current_cmd_index-- ))
-          if (( current_cmd_index < 1 )); then current_cmd_index=$matches_count; fi
-          update_display_start
-          render_ui
-        fi
-        ;;
-      $'\x1b[B') # down
-        if (( matches_count > 0 )); then
-          (( current_cmd_index++ ))
-          if (( current_cmd_index > matches_count )); then current_cmd_index=1; fi
-          update_display_start
-          render_ui
-        fi
-        ;;
-      $'\n'|$'\r') # enter
-        if (( matches_count > 0 )); then
-          selected_line=$(awk -v idx="$current_cmd_index" 'NR==idx' <<< "$cmd_matches")
-          flush_overlay
-          if [[ "$MODE" == "print" ]]; then
-            printf '%s' "$selected_line"
-          else
-            printf '%s\n' "$selected_line"
-            bash -c "$selected_line"
-          fi
-          exit 0
+      fi
+    elif [[ "$key" == $'\x0A' || "$key" == $'\x0D' ]]; then
+      if (( matches_count > 0 )); then
+        selected_line=$(awk -v idx="$current_cmd_index" 'NR==idx' <<< "$cmd_matches")
+        flush_overlay
+        if [[ "$MODE" == "print" ]]; then
+          printf '%s' "$selected_line"
         else
-          flush_overlay
-          exit 1
+          printf '%s\n' "$selected_line"
+          bash -c "$selected_line"
         fi
-        ;;
-      $'\x03'|$'\x1b') # Ctrl-C or Esc
-        cancel_picker
-        ;;
-      *)
-        if [[ -n "$key" && "$key" =~ [[:print:]] ]]; then
-          search_string+="$key"
-          current_cmd_index=1
-          fuzzy_search "$search_string" "$HISTORY_FILE"
-          render_ui
-        fi
-        ;;
-    esac
+        exit 0
+      else
+        flush_overlay
+        exit 1
+      fi
+    elif [[ "$key" == $'\x03' || "$key" == $'\x1b' ]]; then
+      cancel_picker
+    elif [[ -n "$key" && "$key" =~ [[:print:]] ]]; then
+      search_string+="$key"
+      current_cmd_index=1
+      fuzzy_search "$search_string" "$HISTORY_FILE"
+      render_ui
+    fi
   done
 }
 
