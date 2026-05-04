@@ -36,6 +36,9 @@ __rhb_bind() {
   if (( __rhb_ok == 1 )); then
     READLINE_LINE=$__rhb_selected
     READLINE_POINT=${#__rhb_selected}
+  elif (( __rhb_rc == 130 )); then
+    READLINE_LINE=$__rhb_selected
+    READLINE_POINT=${#__rhb_selected}
   else
     READLINE_LINE=$__rhb_line
     READLINE_POINT=$__rhb_point

@@ -148,6 +148,7 @@ flush_overlay() {
 cancel_picker() {
   local prompt_line="$1"
   local restored_line="$2"
+  local print_line="${3:-$restored_line}"
   flush_overlay
   if (( cursor_row > 0 )); then
     move_cursor "$cursor_row" 1
@@ -163,10 +164,13 @@ cancel_picker() {
     fi
   fi
   show_cursor
+  if [[ "$MODE" == "print" ]]; then
+    printf '%s' "$print_line"
+  fi
   exit 130
 }
 
-trap 'cancel_picker "$(get_prompt_line)" "${RHB_QUERY:-}"' INT TERM
+trap 'cancel_picker "$(get_prompt_line)" "$search_string"' INT TERM
 
 count_matches() {
   if [[ -z "$cmd_matches" ]]; then
@@ -903,8 +907,8 @@ main_loop() {
         flush_overlay
         exit 1
       fi
-    elif [[ "$key" == $'\x03' || "$key" == $'\x1b' ]]; then
-      cancel_picker "$(get_prompt_line)" "${RHB_QUERY:-}"
+    elif [[ "$key" == $'\x03' ]]; then
+      cancel_picker "$(get_prompt_line)" "$search_string"
     elif [[ -n "$key" && "$key" =~ [[:print:]] ]]; then
       search_string+="$key"
       current_cmd_index=1
