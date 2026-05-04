@@ -475,6 +475,69 @@ update_display_start() {
   fi
 }
 
+page_size() {
+  local size="$MAX_DISPLAY"
+  if (( size < 1 )); then
+    size=10
+  fi
+  if (( size > 20 )); then
+    size=20
+  fi
+  printf '%s' "$size"
+}
+
+page_up() {
+  local size visible_top new_start
+  size="$(page_size)"
+  if (( matches_count <= 0 )); then
+    return
+  fi
+
+  visible_top=$display_start
+  if (( current_cmd_index > visible_top )); then
+    current_cmd_index=$visible_top
+    return
+  fi
+
+  new_start=$(( display_start - size ))
+  if (( new_start < 1 )); then
+    new_start=1
+  fi
+  display_start=$new_start
+  current_cmd_index=$display_start
+}
+
+page_down() {
+  local size max_start visible_bottom new_start
+  size="$(page_size)"
+  if (( matches_count <= 0 )); then
+    return
+  fi
+
+  visible_bottom=$(( display_start + size - 1 ))
+  if (( visible_bottom > matches_count )); then
+    visible_bottom=$matches_count
+  fi
+  if (( current_cmd_index < visible_bottom )); then
+    current_cmd_index=$visible_bottom
+    return
+  fi
+
+  max_start=$(( matches_count - size + 1 ))
+  if (( max_start < 1 )); then
+    max_start=1
+  fi
+  new_start=$(( display_start + size ))
+  if (( new_start > max_start )); then
+    new_start=$max_start
+  fi
+  display_start=$new_start
+  current_cmd_index=$(( display_start + size - 1 ))
+  if (( current_cmd_index > matches_count )); then
+    current_cmd_index=$matches_count
+  fi
+}
+
 draw_overlay_line() {
   local line="$1"
   tty_printf '\r\033[K'
@@ -570,13 +633,8 @@ render_ui() {
   hide_cursor
 
   local cols="$terminal_cols"
-  local page_size="$MAX_DISPLAY"
-  if (( page_size < 1 )); then
-    page_size=10
-  fi
-  if (( page_size > 20 )); then
-    page_size=20
-  fi
+  local page_size
+  page_size="$(page_size)"
   local draw_cols=$(( cols - 1 ))
   if (( draw_cols < 1 )); then draw_cols=1; fi
   local idx_text="[0/0]"
@@ -798,6 +856,16 @@ main_loop() {
         (( current_cmd_index++ ))
         if (( current_cmd_index > matches_count )); then current_cmd_index=1; fi
         update_display_start
+        render_ui
+      fi
+    elif [[ "$key" == $'\x1b[5~' ]]; then
+      if (( matches_count > 0 )); then
+        page_up
+        render_ui
+      fi
+    elif [[ "$key" == $'\x1b[6~' ]]; then
+      if (( matches_count > 0 )); then
+        page_down
         render_ui
       fi
     elif [[ "$key" == $'\x0A' || "$key" == $'\x0D' ]]; then
