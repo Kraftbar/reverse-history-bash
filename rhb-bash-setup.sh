@@ -23,6 +23,7 @@ __rhb_bind() {
 
   __rhb_selected=$(
     RHB_QUERY="$__rhb_line" \
+    RHB_POINT="$__rhb_point" \
     RHB_PS1="$__rhb_prompt" \
     "$__rhb_script" --print
   )
@@ -34,11 +35,7 @@ __rhb_bind() {
 
   if (( __rhb_ok == 1 )); then
     READLINE_LINE=$__rhb_selected
-    if (( __rhb_point > ${#__rhb_selected} )); then
-      READLINE_POINT=${#__rhb_selected}
-    else
-      READLINE_POINT=$__rhb_point
-    fi
+    READLINE_POINT=${#__rhb_selected}
   else
     READLINE_LINE=$__rhb_line
     READLINE_POINT=$__rhb_point

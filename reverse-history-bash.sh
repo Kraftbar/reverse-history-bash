@@ -41,13 +41,16 @@ move_cursor() {
 }
 
 save_cursor() {
+  # Avoid depending on terminal save/restore semantics across prompt implementations.
+  # We still keep the escape for compatibility, but we always reposition using
+  # the measured cursor coordinates recorded before rendering.
   tty_printf '\0337'
   cursor_saved=1
 }
 
 restore_cursor() {
-  if (( cursor_saved == 1 )); then
-    tty_printf '\0338'
+  if (( cursor_saved == 1 && cursor_row > 0 && cursor_col > 0 )); then
+    move_cursor "$cursor_row" "$cursor_col"
   fi
 }
 
@@ -158,10 +161,10 @@ cancel_picker() {
   flush_overlay
   if (( cursor_saved == 1 )); then
     restore_cursor
-    show_cursor
   elif (( cursor_row > 0 && cursor_col > 0 )); then
     move_cursor "$cursor_row" "$cursor_col"
   fi
+  show_cursor
   exit 130
 }
 
@@ -264,6 +267,18 @@ expand_prompt_escapes() {
   done
 
   printf '%s' "$expanded"
+}
+
+prompt_visible_length() {
+  local prompt="$1"
+  local sanitized
+  sanitized="$(printf '%s' "$prompt" | awk '{
+    gsub(/\x1b\[[0-9;]*[[:alpha:]]/, "", $0)
+    gsub(/\x1b\][^\a]*\a/, "", $0)
+    gsub(/\r/, "", $0)
+    print
+  }')"
+  printf '%s' "${#sanitized}"
 }
 
 get_prompt_line() {
@@ -558,6 +573,7 @@ render_ui() {
   local selected_plain=""
   local visible_matches=""
   local visible_count=0
+  local query_cursor_col="$cursor_col"
   if (( matches_count > 0 )); then
     idx_text="["$current_cmd_index"/"$matches_count"]"
     selected_plain=$(awk -v idx="$current_cmd_index" 'NR==idx' <<< "$cmd_matches")
@@ -580,6 +596,21 @@ render_ui() {
   fi
   prefix_with_status+="$idx_text"
   local header="$prefix_with_status"
+
+  if [[ -n "$prompt_line" ]]; then
+    local prompt_len
+    prompt_len="$(prompt_visible_length "$prompt_line")"
+    if [[ "$prompt_len" =~ ^[0-9]+$ ]]; then
+      query_cursor_col=$(( prompt_len + ${#search_string} + 1 ))
+    fi
+  fi
+  if (( query_cursor_col < 1 )); then
+    query_cursor_col=1
+  fi
+  if (( query_cursor_col > terminal_cols )); then
+    query_cursor_col=$terminal_cols
+  fi
+
   local max_selected_len=$(( draw_cols - 4 ))
   if (( max_selected_len < 0 )); then max_selected_len=0; fi
   selected_plain=$(truncate_line "$selected_plain" "$max_selected_len")
@@ -648,7 +679,7 @@ render_ui() {
   done <<< "$visible_matches"
 
   show_cursor
-  restore_cursor
+  move_cursor "$cursor_row" "$query_cursor_col"
 }
 
 read_key() {
