@@ -15,6 +15,7 @@ current_cmd_index=1   # 1-based index for easier selection
 display_start=1
 search_string="${RHB_QUERY:-}"
 cmd_matches=""
+cmd_matches_array=()
 matches_count=0
 overlay_cap_rows=0
 overlay_rows=0
@@ -145,23 +146,35 @@ flush_overlay() {
 }
 
 cancel_picker() {
+  local prompt_line="$1"
+  local restored_line="$2"
   flush_overlay
-  if (( cursor_saved == 1 )); then
-    restore_cursor
-  elif (( cursor_row > 0 && cursor_col > 0 )); then
-    move_cursor "$cursor_row" "$cursor_col"
+  if (( cursor_row > 0 )); then
+    move_cursor "$cursor_row" 1
+    tty_printf '\r\033[2K'
+    if [[ -n "$prompt_line" ]]; then
+      if [[ -n "$restored_line" && "${prompt_line: -1}" != " " ]]; then
+        tty_printf '%s %s' "$prompt_line" "$restored_line"
+      else
+        tty_printf '%s%s' "$prompt_line" "$restored_line"
+      fi
+    else
+      tty_printf '%s' "$restored_line"
+    fi
   fi
   show_cursor
   exit 130
 }
 
-trap cancel_picker INT TERM
+trap 'cancel_picker "$(get_prompt_line)" "${RHB_QUERY:-}"' INT TERM
 
 count_matches() {
   if [[ -z "$cmd_matches" ]]; then
     matches_count=0
+    cmd_matches_array=()
   else
-    matches_count=$(grep -c '^' <<< "$cmd_matches")
+    mapfile -t cmd_matches_array <<< "$cmd_matches"
+    matches_count=${#cmd_matches_array[@]}
   fi
 }
 
@@ -558,6 +571,7 @@ truncate_line() {
 
 highlight_matches() {
   local line="$1"
+  local restore_after_match="${2:-$RESET}"
   local token clean_token token_escaped highlighted="$line"
   for token in $search_string; do
     clean_token="$token"
@@ -567,7 +581,7 @@ highlight_matches() {
       continue
     fi
     token_escaped="${clean_token//\\/\\\\}"
-    highlighted=$(printf '%s\n' "$highlighted" | awk -v token="$token_escaped" -v on="$HIGHLIGHT_ON" -v off="$RESET" '
+    highlighted=$(printf '%s\n' "$highlighted" | awk -v token="$token_escaped" -v on="$HIGHLIGHT_ON" -v off="$restore_after_match" '
       BEGIN {
         lower_line = ""
         line = ""
@@ -640,12 +654,11 @@ render_ui() {
   local idx_text="[0/0]"
   local selected=""
   local selected_plain=""
-  local visible_matches=""
   local visible_count=0
   local query_cursor_col="$cursor_col"
   if (( matches_count > 0 )); then
     idx_text="["$current_cmd_index"/"$matches_count"]"
-    selected_plain=$(awk -v idx="$current_cmd_index" 'NR==idx' <<< "$cmd_matches")
+    selected_plain="${cmd_matches_array[current_cmd_index-1]}"
   fi
   local prompt_line prefix
   prompt_line="$(get_prompt_line)"
@@ -702,8 +715,13 @@ render_ui() {
 
   if (( matches_count > 0 )); then
     local max_visible_rows=$(( max_overlay_rows - 1 ))
-    visible_matches=$(awk -v start="$display_start" -v max="$max_visible_rows" 'NR >= start && NR < start + max' <<< "$cmd_matches")
-    visible_count=$(awk 'END { print NR }' <<< "$visible_matches")
+    visible_count=$(( matches_count - display_start + 1 ))
+    if (( visible_count > max_visible_rows )); then
+      visible_count=$max_visible_rows
+    fi
+    if (( visible_count < 0 )); then
+      visible_count=0
+    fi
   fi
 
   local new_overlay_rows=$(( visible_count + 1 ))
@@ -728,17 +746,19 @@ render_ui() {
 
   local idx=$display_start
   local row_num=1
-  while IFS= read -r line; do
-    if (( row_num >= overlay_rows )); then
-      break
-    fi
+  while (( row_num < overlay_rows )); do
+    local line="${cmd_matches_array[idx-1]}"
     local row_prefix="  "
     if (( idx == current_cmd_index )); then
       row_prefix="> "
     fi
     local visible_line
     visible_line=$(truncate_line "$line" "$(( draw_cols - 2 ))")
-    visible_line=$(highlight_matches "$visible_line")
+    if (( idx == current_cmd_index )); then
+      visible_line=$(highlight_matches "$visible_line" "${RESET}${ACTIVE_ON}")
+    else
+      visible_line=$(highlight_matches "$visible_line")
+    fi
     local row_text
     tty_printf '\n'
     if (( idx == current_cmd_index )); then
@@ -749,7 +769,7 @@ render_ui() {
     draw_overlay_line "$row_text"
     (( idx++ ))
     (( row_num++ ))
-  done <<< "$visible_matches"
+  done
 
   show_cursor
   move_cursor "$cursor_row" "$query_cursor_col"
@@ -870,7 +890,7 @@ main_loop() {
       fi
     elif [[ "$key" == $'\x0A' || "$key" == $'\x0D' ]]; then
       if (( matches_count > 0 )); then
-        selected_line=$(awk -v idx="$current_cmd_index" 'NR==idx' <<< "$cmd_matches")
+        selected_line="${cmd_matches_array[current_cmd_index-1]}"
         flush_overlay
         if [[ "$MODE" == "print" ]]; then
           printf '%s' "$selected_line"
@@ -884,7 +904,7 @@ main_loop() {
         exit 1
       fi
     elif [[ "$key" == $'\x03' || "$key" == $'\x1b' ]]; then
-      cancel_picker
+      cancel_picker "$(get_prompt_line)" "${RHB_QUERY:-}"
     elif [[ -n "$key" && "$key" =~ [[:print:]] ]]; then
       search_string+="$key"
       current_cmd_index=1
