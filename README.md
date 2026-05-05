@@ -1,5 +1,11 @@
 # reverse-history-bash
 
+Install:
+
+```bash
+git clone https://github.com/Kraftbar/reverse-history-bash ~/.reverse-history-bash && grep -qxF 'source ~/.reverse-history-bash/rhb-bash-setup.sh' ~/.bashrc || printf '\nsource ~/.reverse-history-bash/rhb-bash-setup.sh\n' >> ~/.bashrc
+```
+
 Add to startup:
 
 ```bash
