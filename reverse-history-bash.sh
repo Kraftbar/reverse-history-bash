@@ -9,17 +9,21 @@ RESET=$'\033[0m'
 if ! [[ "$MAX_DISPLAY" =~ ^[0-9]+$ ]] || (( MAX_DISPLAY < 1 )); then
   MAX_DISPLAY=6
 fi
+PAGE_SIZE=$MAX_DISPLAY
+if (( PAGE_SIZE > 20 )); then
+  PAGE_SIZE=20
+fi
 
 # ---------- State ----------
 current_cmd_index=1   # 1-based index for easier selection
 display_start=1
 search_string="${RHB_QUERY:-}"
-cmd_matches=""
 cmd_matches_array=()
 history_original=()
 history_lower=()
 history_loaded=0
 previous_search_string=""
+previous_search_lower=""
 previous_match_indices=()
 previous_match_indices_snapshot=()
 matches_count=0
@@ -27,14 +31,24 @@ partial_results=0
 history_stream_active=0
 history_stream_fd=0
 history_stream_sep=$'\034'
+history_records_file=""
+history_records_source=""
 overlay_cap_rows=0
 overlay_rows=0
 cursor_row=0
 cursor_col=0
 cursor_saved=0
 picker_prompt_line=""
+picker_prompt_len=0
 terminal_rows=24
 terminal_cols=80
+terminal_resized=1
+truncated_line=""
+highlighted_line=""
+highlight_query=""
+highlight_tokens=()
+highlight_tokens_lower=()
+search_results_more=0
 TTY="/dev/tty"
 TTY_FD=0
 if [[ -t 0 && -e "$TTY" ]]; then
@@ -118,10 +132,10 @@ query_cursor_position() {
 }
 
 refresh_terminal_size() {
-  local stty_size
-  stty_size=$(stty size < "$TTY" 2>/dev/null)
-  terminal_rows=$(awk '{print $1}' <<< "$stty_size")
-  terminal_cols=$(awk '{print $2}' <<< "$stty_size")
+  local stty_rows stty_cols
+  read -r stty_rows stty_cols < <(stty size 2>/dev/null < "$TTY" || true)
+  terminal_rows="$stty_rows"
+  terminal_cols="$stty_cols"
   [[ -n "$terminal_rows" && "$terminal_rows" -ge 1 ]] || terminal_rows=24
   [[ -n "$terminal_cols" && "$terminal_cols" -ge 1 ]] || terminal_cols=80
 }
@@ -182,23 +196,33 @@ cancel_picker() {
 }
 
 trap 'cancel_picker "${picker_prompt_line:-$(get_prompt_line)}" "$search_string"' INT TERM
+trap 'terminal_resized=1' WINCH
 
-count_matches() {
-  if [[ -z "$cmd_matches" ]]; then
-    matches_count=0
-    cmd_matches_array=()
-  else
-    mapfile -t cmd_matches_array <<< "$cmd_matches"
-    matches_count=${#cmd_matches_array[@]}
+format_prompt_pwd() {
+  local dir="${1:-$PWD}"
+  local home_dir="${HOME:-}"
+
+  if [[ -n "$home_dir" ]]; then
+    if [[ "$dir" == "$home_dir" ]]; then
+      printf '~'
+      return
+    fi
+    if [[ "$dir" == "$home_dir/"* ]]; then
+      printf '~/%s' "${dir#"$home_dir/"}"
+      return
+    fi
   fi
+
+  printf '%s' "$dir"
 }
 
 expand_prompt_escapes() {
   local prompt="$1"
-  local home="$HOME"
   local host_short="${HOSTNAME%%.*}"
   local host_full="$HOSTNAME"
   local prompt_char='$'
+  local debian_chroot_expr='${debian_chroot:+($debian_chroot)}'
+  local debian_chroot_value="${debian_chroot:-}"
   local expanded=""
   local char next
   local i
@@ -208,13 +232,49 @@ expand_prompt_escapes() {
     prompt_char="#"
   fi
 
+  if [[ "$prompt" == *"$debian_chroot_expr"* ]]; then
+    if [[ -n "$debian_chroot_value" ]]; then
+      prompt="${prompt//"$debian_chroot_expr"/($debian_chroot_value)}"
+    else
+      prompt="${prompt//"$debian_chroot_expr"/}"
+    fi
+  fi
+
   for (( i=0; i<${#prompt}; i++ )); do
     char="${prompt:i:1}"
 
     if (( non_printing == 1 )); then
-      if [[ "$char" == "\\" && ${prompt:i+1:1} == "]" ]]; then
-        non_printing=0
-        ((i++))
+      if [[ "$char" == "\\" ]]; then
+        next="${prompt:i+1:1}"
+        case "$next" in
+          "]")
+            non_printing=0
+            ((i++))
+            ;;
+          "e")
+            expanded+=$'\033'
+            ((i++))
+            ;;
+          "0")
+            if [[ "${prompt:i+1:3}" == "033" ]]; then
+              expanded+=$'\033'
+              ((i += 3))
+            else
+              expanded+="$next"
+              ((i++))
+            fi
+            ;;
+          "\\")
+            expanded+="\\"
+            ((i++))
+            ;;
+          *)
+            expanded+="$next"
+            ((i++))
+            ;;
+        esac
+      else
+        expanded+="$char"
       fi
       continue
     fi
@@ -255,7 +315,7 @@ expand_prompt_escapes() {
         expanded+="${host_full}"
         ;;
       "w")
-        expanded+="${PWD/#$home/~}"
+        expanded+="$(format_prompt_pwd "$PWD")"
         ;;
       "W")
         expanded+="${PWD##*/}"
@@ -271,6 +331,14 @@ expand_prompt_escapes() {
         ;;
       "e")
         expanded+=$'\033'
+        ;;
+      "0")
+        if [[ "${prompt:i:3}" == "033" ]]; then
+          expanded+=$'\033'
+          ((i += 2))
+        else
+          expanded+="$next"
+        fi
         ;;
       "\\\\")
         expanded+="\\"
@@ -313,11 +381,7 @@ get_prompt_line() {
 
   # Expand a minimal set of common prompt escapes without executing prompt
   # code (avoids running command substitutions from custom PS1 setups).
-  if [[ -n ${BASH_VERSINFO+x} && ${BASH_VERSINFO[0]} -ge 5 ]]; then
-    expanded="${prompt@P}"
-  else
-    expanded="$(expand_prompt_escapes "$prompt")"
-  fi
+  expanded="$(expand_prompt_escapes "$prompt")"
 
   # Trim accidental wrapper quotes and recover for broken/non-printing prompts.
   expanded="${expanded#\"}"
@@ -345,7 +409,7 @@ get_prompt_line() {
 
 build_prompt_line() {
   local prompt_host="${HOSTNAME%%.*}"
-  printf '%s' "${USER}@${prompt_host}:${PWD/#$HOME/~}\$ "
+  printf '%s@%s:%s\$ ' "$USER" "$prompt_host" "$(format_prompt_pwd "$PWD")"
 }
 
 emit_normalized_history() {
@@ -481,15 +545,17 @@ history_cache_valid() {
      "$meta_merge" == "${RHB_MERGE_MULTILINE:-1}" ]]
 }
 
-load_initial_cached_page() {
+ensure_history_records_file() {
   local history_file="$1"
-  local sep=$'\034'
-  local cache_root cache_data cache_meta
-  local record line lower limit read_count
+  local cache_root cache_data cache_meta tmp_data tmp_meta
+  local history_size history_mtime
 
-  if [[ -n "$search_string" ]]; then
-    return 1
+  if [[ "$history_records_source" == "$history_file" && -n "$history_records_file" && -r "$history_records_file" ]]; then
+    return 0
   fi
+
+  history_records_file=""
+  history_records_source=""
 
   {
     IFS= read -r cache_root
@@ -497,19 +563,73 @@ load_initial_cached_page() {
     IFS= read -r cache_meta
   } < <(history_cache_paths "$history_file")
 
-  history_cache_valid "$history_file" "$cache_data" "$cache_meta" || return 1
+  if history_cache_valid "$history_file" "$cache_data" "$cache_meta"; then
+    history_records_file="$cache_data"
+    history_records_source="$history_file"
+    return 0
+  fi
 
-  exec {history_stream_fd}< "$cache_data" || return 1
+  read -r history_size history_mtime < <(stat -c '%s %Y' "$history_file" 2>/dev/null || printf '0 0\n')
+
+  if ! mkdir -p "$cache_root" 2>/dev/null; then
+    return 1
+  fi
+
+  tmp_data="${cache_data}.$$"
+  tmp_meta="${cache_meta}.$$"
+  if ! emit_normalized_history "$history_file" "$history_stream_sep" > "$tmp_data"; then
+    return 1
+  fi
+
+  {
+    printf '%s\n' "v1"
+    printf '%s\n' "$history_file"
+    printf '%s\n' "$history_size"
+    printf '%s\n' "$history_mtime"
+    printf '%s\n' "${RHB_MERGE_MULTILINE:-1}"
+  } > "$tmp_meta"
+
+  if mv "$tmp_data" "$cache_data" 2>/dev/null; then
+    mv "$tmp_meta" "$cache_meta" 2>/dev/null || true
+    history_records_file="$cache_data"
+  else
+    history_records_file="$tmp_data"
+  fi
+  history_records_source="$history_file"
+  return 0
+}
+
+close_history_stream() {
+  if (( history_stream_active == 1 )); then
+    exec {history_stream_fd}<&- 2>/dev/null || true
+  fi
+  history_stream_active=0
+}
+
+load_initial_cached_page() {
+  local history_file="$1"
+  local sep=$'\034'
+  local records_file
+  local record line lower limit read_count
+
+  if [[ -n "$search_string" ]]; then
+    return 1
+  fi
+
+  ensure_history_records_file "$history_file" || return 1
+  records_file="$history_records_file"
+
+  close_history_stream
+  exec {history_stream_fd}< "$records_file" || return 1
   history_stream_active=1
   history_stream_sep="$sep"
   history_loaded=0
   history_original=()
   history_lower=()
   cmd_matches_array=()
-  cmd_matches=""
   matches_count=0
   partial_results=0
-  limit="$(page_size)"
+  limit="$PAGE_SIZE"
   read_count=0
 
   while IFS= read -r -u "$history_stream_fd" record; do
@@ -540,7 +660,6 @@ load_initial_cached_page() {
     history_loaded=1
   fi
 
-  cmd_matches="$(printf '%s\n' "${cmd_matches_array[@]}")"
   current_cmd_index=1
   display_start=1
   return 0
@@ -592,56 +711,35 @@ ensure_full_results() {
   finish_history_preload
   partial_results=0
   previous_search_string=""
+  previous_search_lower=""
   previous_match_indices=()
   previous_match_indices_snapshot=()
-  fuzzy_search "$search_string" "$HISTORY_FILE"
+  if [[ -z "$search_string" ]]; then
+    cmd_matches_array=("${history_original[@]}")
+    matches_count=${#cmd_matches_array[@]}
+    if (( matches_count == 0 )); then
+      current_cmd_index=1
+    elif (( current_cmd_index < 1 )); then
+      current_cmd_index=$matches_count
+    elif (( current_cmd_index > matches_count )); then
+      current_cmd_index=1
+    fi
+    update_display_start
+    return
+  fi
+  fuzzy_search "$search_string" "$HISTORY_FILE" full
 }
 
 load_history_entries() {
   local history_file="$1"
   local sep=$'\034'
-  local cache_root cache_key cache_data cache_meta tmp_data tmp_meta
-  local history_size history_mtime
-  local meta_version meta_file meta_size meta_mtime meta_merge
 
   if (( history_loaded == 1 )); then
     return
   fi
 
-  read -r history_size history_mtime < <(stat -c '%s %Y' "$history_file" 2>/dev/null || printf '0 0\n')
-
-  {
-    IFS= read -r cache_root
-    IFS= read -r cache_data
-    IFS= read -r cache_meta
-  } < <(history_cache_paths "$history_file")
-
-  if history_cache_valid "$history_file" "$cache_data" "$cache_meta"; then
-    load_history_records "$cache_data" "$sep"
-    history_loaded=1
-    return
-  fi
-
-  if mkdir -p "$cache_root" 2>/dev/null; then
-    tmp_data="${cache_data}.$$"
-    tmp_meta="${cache_meta}.$$"
-    if emit_normalized_history "$history_file" "$sep" > "$tmp_data"; then
-      {
-        printf '%s\n' "v1"
-        printf '%s\n' "$history_file"
-        printf '%s\n' "$history_size"
-        printf '%s\n' "$history_mtime"
-        printf '%s\n' "${RHB_MERGE_MULTILINE:-1}"
-      } > "$tmp_meta"
-      if mv "$tmp_data" "$cache_data" 2>/dev/null; then
-        mv "$tmp_meta" "$cache_meta" 2>/dev/null || true
-        load_history_records "$cache_data" "$sep"
-      else
-        load_history_records "$tmp_data" "$sep"
-      fi
-    else
-      load_history_entries_uncached "$history_file" "$sep"
-    fi
+  if ensure_history_records_file "$history_file"; then
+    load_history_records "$history_records_file" "$sep"
   else
     load_history_entries_uncached "$history_file" "$sep"
   fi
@@ -649,48 +747,185 @@ load_history_entries() {
   history_loaded=1
 }
 
-query_matches_line() {
-  local lower_line="$1"
-  shift
-  local token
+search_history_records_file() {
+  local lower_query="$1"
+  local records_file="$2"
+  local result_limit="${3:-0}"
+  local sep=$'\034'
+  local count_marker="${sep}count${sep}"
+  local result_count
 
-  for token in "$@"; do
-    [[ -n "$token" ]] || continue
-    if [[ "$lower_line" != *"$token"* ]]; then
+  [[ -r "$records_file" ]] || return 1
+
+  search_results_more=0
+  mapfile -t cmd_matches_array < <(
+    awk -v sep="$sep" -v query="$lower_query" -v result_limit="$result_limit" -v count_marker="$count_marker" '
+      BEGIN {
+        count = 0
+        raw_count = split(query, raw_tokens, /[[:space:]]+/)
+        for (idx = 1; idx <= raw_count; idx++) {
+          if (raw_tokens[idx] != "") {
+            tokens[++token_count] = raw_tokens[idx]
+          }
+        }
+        if (token_count == 1) {
+          single_token = tokens[1]
+        }
+      }
+
+      {
+        sep_pos = index($0, sep)
+        if (sep_pos == 0) {
+          next
+        }
+
+        lower_line = substr($0, 1, sep_pos - 1)
+        if (single_token != "") {
+          matched = (index(lower_line, single_token) != 0)
+        } else {
+          matched = 1
+          for (idx = 1; idx <= token_count; idx++) {
+            if (index(lower_line, tokens[idx]) == 0) {
+              matched = 0
+              break
+            }
+          }
+        }
+
+        if (matched == 1) {
+          count++
+          line = substr($0, sep_pos + length(sep))
+          if (result_limit > 0) {
+            if (count <= result_limit) {
+              results[count] = line
+            }
+            if (count > result_limit) {
+              exit
+            }
+          } else {
+            print line
+          }
+        }
+      }
+
+      END {
+        if (result_limit > 0) {
+          print count_marker count
+          for (idx = 1; idx <= count && idx <= result_limit; idx++) {
+            print results[idx]
+          }
+        }
+      }
+    ' "$records_file"
+  )
+  if (( result_limit > 0 )); then
+    if [[ "${cmd_matches_array[0]:-}" == "$count_marker"* ]]; then
+      result_count="${cmd_matches_array[0]#"$count_marker"}"
+      cmd_matches_array=("${cmd_matches_array[@]:1}")
+      if (( result_count > result_limit )); then
+        search_results_more=1
+        matches_count=${#cmd_matches_array[@]}
+      else
+        matches_count=$result_count
+      fi
+    else
       return 1
     fi
-  done
+  else
+    matches_count=${#cmd_matches_array[@]}
+  fi
   return 0
 }
 
 fuzzy_search() {
   local query="$1"
   local history_file="$2"
-  local lower_query lower_previous
+  local result_mode="${3:-page}"
+  local lower_query
   local -a tokens
-  local idx
-
-  finish_history_preload
-  load_history_entries "$history_file"
+  local idx token lower_line matched history_len
+  local result_limit="$PAGE_SIZE"
 
   partial_results=0
+  if [[ "$result_mode" == "full" ]]; then
+    result_limit=0
+  fi
   lower_query="${query,,}"
-  lower_previous="${previous_search_string,,}"
   read -r -a tokens <<< "$lower_query"
 
   cmd_matches_array=()
   previous_match_indices=()
 
-  if [[ -n "$previous_search_string" && "$lower_query" == "$lower_previous"* ]]; then
+  if (( ${#tokens[@]} == 0 )); then
+    previous_search_string=""
+    previous_search_lower=""
+    previous_match_indices_snapshot=()
+
+    if load_initial_cached_page "$history_file"; then
+      return
+    fi
+
+    finish_history_preload
+    load_history_entries "$history_file"
+    cmd_matches_array=("${history_original[@]}")
+    matches_count=${#cmd_matches_array[@]}
+    current_cmd_index=1
+    update_display_start
+    return
+  fi
+
+  close_history_stream
+
+  if ensure_history_records_file "$history_file" && search_history_records_file "$lower_query" "$history_records_file" "$result_limit"; then
+    if (( result_limit > 0 && search_results_more == 1 )); then
+      partial_results=1
+    fi
+    previous_search_string="$query"
+    previous_search_lower="$lower_query"
+    previous_match_indices_snapshot=()
+
+    if (( matches_count == 0 )); then
+      current_cmd_index=1
+    elif (( current_cmd_index < 1 )); then
+      current_cmd_index=$matches_count
+    elif (( current_cmd_index > matches_count )); then
+      current_cmd_index=1
+    fi
+
+    update_display_start
+    return
+  fi
+
+  finish_history_preload
+  load_history_entries "$history_file"
+
+  if [[ -n "$previous_search_string" && "$lower_query" == "$previous_search_lower"* ]]; then
     for idx in "${previous_match_indices_snapshot[@]}"; do
-      if query_matches_line "${history_lower[idx]}" "${tokens[@]}"; then
+      lower_line="${history_lower[idx]}"
+      matched=1
+      for token in "${tokens[@]}"; do
+        if [[ "$lower_line" != *"$token"* ]]; then
+          matched=0
+          break
+        fi
+      done
+      if (( matched == 1 )); then
         cmd_matches_array+=("${history_original[idx]}")
         previous_match_indices+=("$idx")
       fi
     done
   else
-    for (( idx = 0; idx < ${#history_original[@]}; idx++ )); do
-      if query_matches_line "${history_lower[idx]}" "${tokens[@]}"; then
+    history_len=${#history_original[@]}
+    for (( idx = 0; idx < history_len; idx++ )); do
+      lower_line="${history_lower[idx]}"
+      matched=1
+      for token in "${tokens[@]}"; do
+        if [[ "$lower_line" != *"$token"* ]]; then
+          matched=0
+          break
+        fi
+      done
+      if (( matched == 1 )); then
         cmd_matches_array+=("${history_original[idx]}")
         previous_match_indices+=("$idx")
       fi
@@ -698,12 +933,8 @@ fuzzy_search() {
   fi
 
   matches_count=${#cmd_matches_array[@]}
-  if (( matches_count == 0 )); then
-    cmd_matches=""
-  else
-    cmd_matches="$(printf '%s\n' "${cmd_matches_array[@]}")"
-  fi
   previous_search_string="$query"
+  previous_search_lower="$lower_query"
   previous_match_indices_snapshot=("${previous_match_indices[@]}")
 
   if (( matches_count == 0 )); then
@@ -720,6 +951,11 @@ fuzzy_search() {
 delete_last_query_char() {
   local -i len code
   if [[ -z "$search_string" ]]; then
+    return
+  fi
+
+  if [[ "$search_string" != *[![:ascii:]]* ]]; then
+    search_string="${search_string%?}"
     return
   fi
 
@@ -766,20 +1002,9 @@ update_display_start() {
   fi
 }
 
-page_size() {
-  local size="$MAX_DISPLAY"
-  if (( size < 1 )); then
-    size=10
-  fi
-  if (( size > 20 )); then
-    size=20
-  fi
-  printf '%s' "$size"
-}
-
 page_up() {
   local size visible_top new_start
-  size="$(page_size)"
+  size="$PAGE_SIZE"
   if (( matches_count <= 0 )); then
     return
   fi
@@ -800,7 +1025,7 @@ page_up() {
 
 page_down() {
   local size max_start visible_bottom new_start
-  size="$(page_size)"
+  size="$PAGE_SIZE"
   if (( matches_count <= 0 )); then
     return
   fi
@@ -839,22 +1064,23 @@ truncate_line() {
   local line="$1"
   local width="$2"
   if (( width < 1 )); then
-    printf ''
+    truncated_line=""
   elif (( ${#line} > width )); then
-    printf '%s' "${line:0:width}"
+    truncated_line="${line:0:width}"
   else
-    printf '%s' "$line"
+    truncated_line="$line"
   fi
 }
 
-highlight_matches() {
-  local line="$1"
-  local restore_after_match="${2:-$RESET}"
-  local -a tokens=()
-  local token clean_token lower_line lower_token
-  local highlighted="" match_text best_match best_len
-  local pos i
+prepare_highlight_tokens() {
+  local token clean_token
 
+  if [[ "$highlight_query" == "$search_string" ]]; then
+    return
+  fi
+
+  highlight_tokens=()
+  highlight_tokens_lower=()
   for token in $search_string; do
     clean_token="$token"
     clean_token="${clean_token#^}"
@@ -862,11 +1088,21 @@ highlight_matches() {
     if [[ "$clean_token" == *"["*"]"* || -z "$clean_token" ]]; then
       continue
     fi
-    tokens+=("$clean_token")
+    highlight_tokens+=("$clean_token")
+    highlight_tokens_lower+=("${clean_token,,}")
   done
+  highlight_query="$search_string"
+}
 
-  if (( ${#tokens[@]} == 0 )); then
-    printf '%s' "$line"
+highlight_matches() {
+  local line="$1"
+  local restore_after_match="${2:-$RESET}"
+  local token lower_line lower_token
+  local highlighted="" best_match best_len
+  local pos token_idx token_len
+
+  if (( ${#highlight_tokens[@]} == 0 )); then
+    highlighted_line="$line"
     return
   fi
 
@@ -875,11 +1111,13 @@ highlight_matches() {
   while (( pos < ${#line} )); do
     best_match=""
     best_len=0
-    for token in "${tokens[@]}"; do
-      lower_token="${token,,}"
-      if [[ "${lower_line:pos:${#token}}" == "$lower_token" && ${#token} -gt best_len ]]; then
-        best_match="${line:pos:${#token}}"
-        best_len=${#token}
+    for (( token_idx = 0; token_idx < ${#highlight_tokens[@]}; token_idx++ )); do
+      token="${highlight_tokens[token_idx]}"
+      lower_token="${highlight_tokens_lower[token_idx]}"
+      token_len=${#token}
+      if [[ "${lower_line:pos:token_len}" == "$lower_token" && token_len -gt best_len ]]; then
+        best_match="${line:pos:token_len}"
+        best_len=$token_len
       fi
     done
 
@@ -892,7 +1130,7 @@ highlight_matches() {
     fi
   done
 
-  printf '%s' "$highlighted"
+  highlighted_line="$highlighted"
 }
 
 rotate_query_words() {
@@ -923,7 +1161,10 @@ delete_query_word() {
 }
 
 render_ui() {
-  refresh_terminal_size
+  if (( terminal_resized == 1 )); then
+    refresh_terminal_size
+    terminal_resized=0
+  fi
   if (( cursor_row <= 0 || cursor_col <= 0 )); then
     return
   fi
@@ -933,22 +1174,18 @@ render_ui() {
 
   local cols="$terminal_cols"
   local page_size
-  page_size="$(page_size)"
+  page_size="$PAGE_SIZE"
   local draw_cols=$(( cols - 1 ))
   if (( draw_cols < 1 )); then draw_cols=1; fi
   local idx_text="[0/0]"
-  local selected=""
-  local selected_plain=""
   local visible_count=0
   local loading_text=""
-  local query_cursor_col="$cursor_col"
   if (( matches_count > 0 )); then
     if (( partial_results == 1 )); then
       idx_text="["$current_cmd_index"/"$matches_count"+]"
     else
       idx_text="["$current_cmd_index"/"$matches_count"]"
     fi
-    selected_plain="${cmd_matches_array[current_cmd_index-1]}"
   fi
   if (( history_stream_active == 1 )); then
     loading_text=" loading..."
@@ -968,31 +1205,7 @@ render_ui() {
     prefix="$search_string"
   fi
 
-  local prefix_with_status="$prefix"
-  if [[ -n "$prefix_with_status" ]]; then
-    prefix_with_status+=" "
-  fi
-  prefix_with_status+="$idx_text$loading_text"
-  local header="$prefix_with_status"
-
-  if [[ -n "$prompt_line" ]]; then
-    local prompt_len
-    prompt_len="$(prompt_visible_length "$prompt_line")"
-    if [[ "$prompt_len" =~ ^[0-9]+$ ]]; then
-      query_cursor_col=$(( prompt_len + ${#search_string} + 1 ))
-    fi
-  fi
-  if (( query_cursor_col < 1 )); then
-    query_cursor_col=1
-  fi
-  if (( query_cursor_col > terminal_cols )); then
-    query_cursor_col=$terminal_cols
-  fi
-
-  local max_selected_len=$(( draw_cols - 4 ))
-  if (( max_selected_len < 0 )); then max_selected_len=0; fi
-  selected_plain=$(truncate_line "$selected_plain" "$max_selected_len")
-  selected=$(highlight_matches "$selected_plain")
+  local status_text="$idx_text$loading_text"
 
   local max_lines_below=$(( terminal_rows - cursor_row + 1 ))
   if (( max_lines_below <= 0 )); then
@@ -1038,8 +1251,16 @@ render_ui() {
   fi
 
   restore_cursor
-  draw_overlay_line "$header"
+  draw_overlay_line "$prefix"
+  tty_printf '\0337'
+  if [[ -n "$status_text" ]]; then
+    if [[ -n "$prefix" && "${prefix: -1}" != " " ]]; then
+      tty_printf ' '
+    fi
+    tty_printf '%s' "$status_text"
+  fi
 
+  prepare_highlight_tokens
   local idx=$display_start
   local row_num=1
   while (( row_num < overlay_rows )); do
@@ -1049,12 +1270,14 @@ render_ui() {
       row_prefix="> "
     fi
     local visible_line
-    visible_line=$(truncate_line "$line" "$(( draw_cols - 2 ))")
+    truncate_line "$line" "$(( draw_cols - 2 ))"
+    visible_line="$truncated_line"
     if (( idx == current_cmd_index )); then
-      visible_line=$(highlight_matches "$visible_line" "${RESET}${ACTIVE_ON}")
+      highlight_matches "$visible_line" "${RESET}${ACTIVE_ON}"
     else
-      visible_line=$(highlight_matches "$visible_line")
+      highlight_matches "$visible_line"
     fi
+    visible_line="$highlighted_line"
     local row_text
     tty_printf '\n'
     if (( idx == current_cmd_index )); then
@@ -1068,7 +1291,7 @@ render_ui() {
   done
 
   show_cursor
-  move_cursor "$cursor_row" "$query_cursor_col"
+  tty_printf '\0338'
 }
 
 read_key() {
@@ -1142,11 +1365,13 @@ fi
 main_loop() {
   history -a "$HISTORY_FILE"
   refresh_terminal_size
+  terminal_resized=0
   query_cursor_position || {
     echo "reverse-history: unable to locate cursor; aborting" >&2
     exit 1
   }
   picker_prompt_line="$(get_prompt_line)"
+  picker_prompt_len="$(prompt_visible_length "$picker_prompt_line")"
   load_initial_cached_page "$HISTORY_FILE" || fuzzy_search "$search_string" "$HISTORY_FILE"
   render_ui
   while true; do
@@ -1189,20 +1414,32 @@ main_loop() {
       fuzzy_search "$search_string" "$HISTORY_FILE"
       render_ui
     elif [[ "$key" == $'\x1b[A' ]]; then
-      ensure_full_results
-      if (( matches_count > 0 )); then
+      if (( partial_results == 1 && matches_count > 0 && current_cmd_index > 1 )); then
         (( current_cmd_index-- ))
-        if (( current_cmd_index < 1 )); then current_cmd_index=$matches_count; fi
         update_display_start
         render_ui
+      else
+        ensure_full_results
+        if (( matches_count > 0 )); then
+          (( current_cmd_index-- ))
+          if (( current_cmd_index < 1 )); then current_cmd_index=$matches_count; fi
+          update_display_start
+          render_ui
+        fi
       fi
     elif [[ "$key" == $'\x1b[B' ]]; then
-      ensure_full_results
-      if (( matches_count > 0 )); then
+      if (( partial_results == 1 && matches_count > 0 && current_cmd_index < ${#cmd_matches_array[@]} )); then
         (( current_cmd_index++ ))
-        if (( current_cmd_index > matches_count )); then current_cmd_index=1; fi
         update_display_start
         render_ui
+      else
+        ensure_full_results
+        if (( matches_count > 0 )); then
+          (( current_cmd_index++ ))
+          if (( current_cmd_index > matches_count )); then current_cmd_index=1; fi
+          update_display_start
+          render_ui
+        fi
       fi
     elif [[ "$key" == $'\x1b[5~' ]]; then
       ensure_full_results
