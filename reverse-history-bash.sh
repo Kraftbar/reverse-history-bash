@@ -38,6 +38,8 @@ overlay_rows=0
 cursor_row=0
 cursor_col=0
 cursor_saved=0
+initial_render=1
+reuse_initial_line=0
 picker_prompt_line=""
 picker_prompt_len=0
 terminal_rows=24
@@ -59,6 +61,15 @@ fi
 tty_printf() {
   if (( TTY_FD > 0 )); then
     printf "$@" >&"$TTY_FD"
+  fi
+}
+
+emit_result() {
+  local result="$1"
+  if [[ -n "${RHB_RESULT_FILE:-}" ]]; then
+    printf '%s' "$result" > "$RHB_RESULT_FILE"
+  else
+    printf '%s' "$result"
   fi
 }
 
@@ -189,8 +200,9 @@ cancel_picker() {
     fi
   fi
   show_cursor
+  tty_printf '\n'
   if [[ "$MODE" == "print" ]]; then
-    printf '%s' "$print_line"
+    emit_result "$print_line"
   fi
   exit 130
 }
@@ -1238,6 +1250,11 @@ render_ui() {
     new_overlay_rows=$max_overlay_rows
   fi
 
+  local reuse_current_line=0
+  if (( initial_render == 1 && reuse_initial_line == 1 && overlay_cap_rows == 0 )); then
+    reuse_current_line=1
+  fi
+
   flush_overlay "$overlay_cap_rows"
   overlay_rows=$new_overlay_rows
   if (( overlay_rows > overlay_cap_rows )); then
@@ -1251,8 +1268,12 @@ render_ui() {
   fi
 
   restore_cursor
-  draw_overlay_line "$prefix"
-  tty_printf '\0337'
+  if (( reuse_current_line == 1 )); then
+    tty_printf '\0337'
+  else
+    draw_overlay_line "$prefix"
+    tty_printf '\0337'
+  fi
   if [[ -n "$status_text" ]]; then
     if [[ -n "$prefix" && "${prefix: -1}" != " " ]]; then
       tty_printf ' '
@@ -1292,6 +1313,7 @@ render_ui() {
 
   show_cursor
   tty_printf '\0338'
+  initial_render=0
 }
 
 read_key() {
@@ -1370,6 +1392,9 @@ main_loop() {
     echo "reverse-history: unable to locate cursor; aborting" >&2
     exit 1
   }
+  if [[ "${RHB_REUSE_INITIAL_LINE:-0}" == "1" ]]; then
+    reuse_initial_line=1
+  fi
   picker_prompt_line="$(get_prompt_line)"
   picker_prompt_len="$(prompt_visible_length "$picker_prompt_line")"
   load_initial_cached_page "$HISTORY_FILE" || fuzzy_search "$search_string" "$HISTORY_FILE"
@@ -1458,7 +1483,7 @@ main_loop() {
         selected_line="${cmd_matches_array[current_cmd_index-1]}"
         flush_overlay
         if [[ "$MODE" == "print" ]]; then
-          printf '%s' "$selected_line"
+          emit_result "$selected_line"
         else
           printf '%s\n' "$selected_line"
           bash -c "$selected_line"
