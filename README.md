@@ -6,6 +6,12 @@ Install:
 git clone https://github.com/Kraftbar/reverse-history-bash ~/.reverse-history-bash && grep -qxF 'source ~/.reverse-history-bash/rhb-bash-setup.sh' ~/.bashrc || printf '\nsource ~/.reverse-history-bash/rhb-bash-setup.sh\n' >> ~/.bashrc
 ```
 
+Update an existing install:
+
+```bash
+git -C ~/.reverse-history-bash pull --ff-only && source ~/.reverse-history-bash/rhb-bash-setup.sh
+```
+
 Add to startup:
 
 ```bash
