@@ -32,7 +32,7 @@ Terminal regression checks (Linux, Bash and Python 3; no extra Python packages):
 
 ```bash
 bash -n reverse-history-bash.sh rhb-bash-setup.sh
-python3 -m unittest discover -s tests -v
+python3 -m unittest -v test_terminal
 ```
 
 The checks run the picker in isolated pseudo-terminals with temporary history

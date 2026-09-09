@@ -14,7 +14,7 @@ import time
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "reverse-history-bash.sh"
+SCRIPT = Path(__file__).resolve().parent / "reverse-history-bash.sh"
 ANSI = re.compile(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|[78])")
 
 
