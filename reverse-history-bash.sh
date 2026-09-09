@@ -1219,6 +1219,34 @@ render_ui() {
 
   local status_text="$idx_text$loading_text"
 
+  # A prompt on the last row still needs space for results. Scroll only the
+  # missing rows into view and move our saved prompt coordinates with it.
+  if (( cursor_row > terminal_rows )); then
+    cursor_row=$terminal_rows
+    reuse_initial_line=0
+  fi
+  if (( page_size > terminal_rows - 1 )); then
+    page_size=$(( terminal_rows - 1 ))
+  fi
+  local needed_rows=$(( matches_count < page_size ? matches_count + 1 : page_size + 1 ))
+  local scroll_rows=$(( cursor_row + needed_rows - 1 - terminal_rows ))
+  if (( scroll_rows > 0 )); then
+    move_cursor "$terminal_rows" 1
+    local scroll_idx
+    for (( scroll_idx=0; scroll_idx<scroll_rows; scroll_idx++ )); do
+      tty_printf '\n'
+    done
+    cursor_row=$(( cursor_row - scroll_rows ))
+    reuse_initial_line=0
+  fi
+  if (( page_size > 0 && matches_count > 0 )); then
+    if (( current_cmd_index < display_start )); then
+      display_start=$current_cmd_index
+    elif (( current_cmd_index >= display_start + page_size )); then
+      display_start=$(( current_cmd_index - page_size + 1 ))
+    fi
+  fi
+
   local max_lines_below=$(( terminal_rows - cursor_row + 1 ))
   if (( max_lines_below <= 0 )); then
     overlay_cap_rows=$overlay_rows
