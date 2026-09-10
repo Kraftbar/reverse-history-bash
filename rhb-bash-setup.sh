@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Source from ~/.bashrc:
-#   source "/home/nybo/reverse-history-bash/rhb-bash-setup.sh"
+#   source "$HOME/.reverse-history-bash/rhb-bash-setup.sh"
 
 __rhb_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/reverse-history-bash.sh"
 
