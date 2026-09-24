@@ -50,7 +50,8 @@ __rhb_bind() {
   )
   __rhb_rc=$?
   if (( __rhb_rc == 0 )); then
-    __rhb_selected=$(<"$__rhb_result_file")
+    # $(<file) inside bind -x breaks parsing of the accepted line in bash 5.2.
+    IFS= read -r -d '' __rhb_selected < "$__rhb_result_file"
   else
     __rhb_selected=""
   fi

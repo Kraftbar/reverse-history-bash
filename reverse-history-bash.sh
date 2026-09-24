@@ -38,6 +38,7 @@ overlay_rows=0
 cursor_row=0
 cursor_col=0
 cursor_saved=0
+pending_keys=""
 initial_render=1
 reuse_initial_line=0
 picker_prompt_line=""
@@ -115,18 +116,17 @@ query_cursor_position() {
   fi
 
   tty_printf '\e[6n'
-  local got
-  read -rs -t 0.2 -u "$TTY_FD" -n 1 got
-  if [[ "$got" != $'\e' ]]; then
-    stty "$saved_stty" <"$TTY" 2>/dev/null || true
-    return 1
-  fi
-  read -rs -t 0.2 -u "$TTY_FD" -n 1 got
-  if [[ "$got" != '[' ]]; then
-    stty "$saved_stty" <"$TTY" 2>/dev/null || true
-    return 1
-  fi
-  read -rs -t 0.2 -u "$TTY_FD" -d R current
+  # Keys typed right after Ctrl-R can arrive before the terminal's reply;
+  # keep them for the search box instead of mistaking them for the reply.
+  local got buf=""
+  while IFS= read -rs -t 0.5 -u "$TTY_FD" -N 1 got; do
+    buf+="$got"
+    if [[ "$buf" =~ $'\e'\[([0-9]+\;[0-9]+)R$ ]]; then
+      current="${BASH_REMATCH[1]}"
+      pending_keys+="${buf:0:${#buf}-${#BASH_REMATCH[0]}}"
+      break
+    fi
+  done
   stty "$saved_stty" <"$TTY" 2>/dev/null || true
 
   if ! [[ "$current" =~ ^[0-9]+\;[0-9]+$ ]]; then
@@ -1348,6 +1348,11 @@ read_key() {
   local timeout="${1:-}"
   local k rest
   key=""
+  if [[ -n "$pending_keys" ]]; then
+    key="${pending_keys:0:1}"
+    pending_keys="${pending_keys:1}"
+    return 0
+  fi
   if (( TTY_FD > 0 )); then
     if [[ -n "$timeout" ]]; then
       IFS= read -rsN1 -t "$timeout" -u "$TTY_FD" k || {
