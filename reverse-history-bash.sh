@@ -1526,7 +1526,7 @@ main_loop() {
         flush_overlay
         exit 1
       fi
-    elif [[ "$key" == $'\x03' ]]; then
+    elif [[ "$key" == $'\x03' || "$key" == $'\x1b' ]]; then
       cancel_picker "${picker_prompt_line:-$(get_prompt_line)}" "$search_string"
     elif [[ -n "$key" && "$key" =~ [[:print:]] ]]; then
       search_string+="$key"

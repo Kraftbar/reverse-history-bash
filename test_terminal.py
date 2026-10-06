@@ -127,6 +127,12 @@ class TerminalTests(unittest.TestCase):
         self.assertEqual(picker.finish(b"\x03"), 130)
         self.assertEqual(picker.result.read_text(), "result")
 
+    def test_escape_cancels_and_returns_query(self):
+        picker = self.picker(query="result")
+        picker.frame()
+        self.assertEqual(picker.finish(b"\x1b"), 130)
+        self.assertEqual(picker.result.read_text(), "result")
+
     def test_single_row_terminal_can_exit(self):
         picker = self.picker(rows=1, row=1)
         picker.frame()
