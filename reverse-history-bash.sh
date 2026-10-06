@@ -186,6 +186,12 @@ cancel_picker() {
   local restored_line="$2"
   local print_line="${3:-$restored_line}"
   flush_overlay
+  if [[ "$MODE" == "print" ]]; then
+    # Readline redraws the prompt where we leave the cursor, so stay on its row.
+    show_cursor
+    emit_result "$print_line"
+    exit 130
+  fi
   if (( cursor_row > 0 )); then
     move_cursor "$cursor_row" 1
     tty_printf '\r\033[2K'
@@ -201,9 +207,6 @@ cancel_picker() {
   fi
   show_cursor
   tty_printf '\n'
-  if [[ "$MODE" == "print" ]]; then
-    emit_result "$print_line"
-  fi
   exit 130
 }
 

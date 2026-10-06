@@ -76,6 +76,17 @@ class Picker:
             time.sleep(0.01)
         raise AssertionError("Picker did not exit")
 
+    def drain(self):
+        while select.select([self.fd], [], [], 0.05)[0]:
+            try:
+                chunk = os.read(self.fd, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            self.buffer += chunk
+        return self.buffer
+
     def close(self):
         if self.pid is not None:
             os.kill(self.pid, signal.SIGKILL)
@@ -132,6 +143,7 @@ class TerminalTests(unittest.TestCase):
         picker.frame()
         self.assertEqual(picker.finish(b"\x1b"), 130)
         self.assertEqual(picker.result.read_text(), "result")
+        self.assertNotIn(b"\n", picker.drain())
 
     def test_single_row_terminal_can_exit(self):
         picker = self.picker(rows=1, row=1)
