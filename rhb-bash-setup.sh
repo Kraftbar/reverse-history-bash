@@ -49,7 +49,7 @@ __rhb_bind() {
     "$__rhb_script" --print
   )
   __rhb_rc=$?
-  if (( __rhb_rc == 0 )); then
+  if (( __rhb_rc == 0 || __rhb_rc == 130 )); then
     # $(<file) inside bind -x breaks parsing of the accepted line in bash 5.2.
     IFS= read -r -d '' __rhb_selected < "$__rhb_result_file"
   else
