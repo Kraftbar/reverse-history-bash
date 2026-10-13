@@ -77,3 +77,22 @@ __rhb_bind() {
 
 bind -r '\C-r'
 bind -x '"\C-r":"__rhb_bind"'
+
+# Report updates fetched by an earlier shell, then refresh in the background
+# at most once a day so startup never waits on the network.
+__rhb_check_update() {
+  local dir=${__rhb_script%/*} fetch_head behind
+  [[ $- == *i* && ${RHB_UPDATE_CHECK:-1} != 0 && -d $dir/.git ]] || return
+  behind=$(git -C "$dir" rev-list --count 'HEAD..@{u}' 2>/dev/null)
+  if (( behind > 0 )); then
+    printf 'reverse-history-bash: update available (%s new commits). Run:\n  git -C %q pull --ff-only && source %q\n' \
+      "$behind" "$dir" "$dir/rhb-bash-setup.sh" >&2
+  fi
+  fetch_head=$dir/.git/FETCH_HEAD
+  if [[ ! -e $fetch_head || -z $(find "$fetch_head" -mmin -1440 2>/dev/null) ]]; then
+    touch "$fetch_head" 2>/dev/null
+    (GIT_TERMINAL_PROMPT=0 git -C "$dir" fetch --quiet >/dev/null 2>&1 &)
+  fi
+}
+__rhb_check_update
+unset -f __rhb_check_update
